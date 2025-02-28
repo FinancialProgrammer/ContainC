@@ -15,19 +15,8 @@
 
 using namespace std;
 
-typedef enum {
-  QUEUE_TYPE_CUSTOM,
-  QUEUE_TYPE_RIGTORP,
-  QUEUE_TYPE_CAMERON
-} queue_type_t;
-
 typedef struct {
-  union {
-    queue_t* custom_queue;
-    rigtorp::MPMCQueue<void*>* rigtorp_queue;
-    moodycamel::ConcurrentQueue<void*>* cameron_queue;
-  };
-  queue_type_t type;
+  moodycamel::ConcurrentQueue<void*>* queue;
   size_t num_items;
   size_t num_producers;
   size_t num_consumers;
@@ -60,38 +49,15 @@ void* producer_thread(void* arg) {
     void* data = (void*)(uintptr_t)(produced + 1);
     bool success = false;
     
-    switch (ctx->type) {
-      case QUEUE_TYPE_CUSTOM:
-        success = queue_put(ctx->custom_queue, data);
-        break;
-      
-      case QUEUE_TYPE_RIGTORP:
-        success = ctx->rigtorp_queue->try_push(data);
-        if (!success) {
-          // Spin for a bit before trying again
-          for (int i = 0; i < 10; i++) {
-            __asm__ volatile("pause");
-          }
-        }
-        break;
-      
-      case QUEUE_TYPE_CAMERON:
-        ctx->cameron_queue->enqueue(data);
-        success = true;
-        break;
-    }
-    
+    ctx->queue->enqueue(data);
+    success = true;
+
     if (success) {
       produced++;
       atomic_fetch_add(&ctx->items_produced, 1);
     }
   }
-  
-  // Make sure to flush any remaining items in thread-local buffer
-  if (ctx->type == QUEUE_TYPE_CUSTOM) {
-    queue_flush_buffer(ctx->custom_queue);
-  }
-  
+
   return NULL;
 }
 
@@ -106,29 +72,9 @@ void* consumer_thread(void* arg) {
          atomic_load(&ctx->items_consumed) < atomic_load(&ctx->items_produced)) {
     void* data = NULL;
     bool success = false;
-    
-    switch (ctx->type) {
-      case QUEUE_TYPE_CUSTOM:
-        // Use a small timeout to avoid spinning too much
-        data = queue_get(ctx->custom_queue, 1);  // 1ms timeout
-        success = (data != NULL);
-        break;
-      
-      case QUEUE_TYPE_RIGTORP:
-        success = ctx->rigtorp_queue->try_pop(data);
-        if (!success) {
-          // Spin for a bit before trying again
-          for (int i = 0; i < 10; i++) {
-            __asm__ volatile("pause");
-          }
-        }
-        break;
-      
-      case QUEUE_TYPE_CAMERON:
-        success = ctx->cameron_queue->try_dequeue(data);
-        break;
-    }
-    
+
+    success = ctx->queue->try_dequeue(data);
+
     if (success) {
       atomic_fetch_add(&ctx->items_consumed, 1);
     } else if (!atomic_load(&ctx->running) && 
@@ -225,11 +171,6 @@ void run_benchmark(benchmark_context_t* ctx, const char* name) {
   // Stop the benchmark
   end_time = get_time_seconds();
   atomic_store(&ctx->running, false);
-  
-  // Make sure all producers have flushed their buffers
-  if (ctx->type == QUEUE_TYPE_CUSTOM) {
-    queue_shutdown(ctx->custom_queue);
-  }
   
   // Wait for all threads to finish
   for (size_t i = 0; i < ctx->num_producers; i++) {
@@ -329,99 +270,11 @@ int main(int argc, char* argv[]) {
   }
   
   printf("Starting benchmarks...\n\n");
-  
-  // Change the order to test our queue last, as it's the one we're developing
-  
-  // Benchmark Rigtorp's MPMCQueue
-  ctx.type = QUEUE_TYPE_RIGTORP;
-  ctx.rigtorp_queue = new rigtorp::MPMCQueue<void*>(ctx.num_items);
-  run_benchmark(&ctx, "Rigtorp MPMCQueue");
-  delete ctx.rigtorp_queue;
-  
-  // Benchmark cameron314's ConcurrentQueue
-  ctx.type = QUEUE_TYPE_CAMERON;
-  ctx.cameron_queue = new moodycamel::ConcurrentQueue<void*>();
+
+  ctx.queue = new moodycamel::ConcurrentQueue<void*>();
   run_benchmark(&ctx, "cameron314 ConcurrentQueue");
-  delete ctx.cameron_queue;
+  delete ctx.queue;
   
-  // Default allocator benchmark
-  ctx.type = QUEUE_TYPE_CUSTOM;
-  ctx.custom_queue = queue_create(0, NULL);  // Unlimited size, default allocator
-  queue_set_buffer_size(ctx.custom_queue, ctx.buffer_size);
-  run_benchmark(&ctx, "Custom Queue (Default Allocator)");
-  queue_destroy(ctx.custom_queue);
-
-/*
-  // Pool allocator benchmark
-  ctx.type = QUEUE_TYPE_CUSTOM;
-  queue_allocator_t pool_allocator = queue_create_pool_allocator(
-    sizeof(queue_item_t),      // Size of queue items
-    ctx.buffer_size * 2,       // Blocks per chunk - use twice buffer size for efficiency
-    0                          // No maximum chunks limit
-  );
-  ctx.custom_queue = queue_create(0, &pool_allocator);  // Unlimited size with pool allocator
-  queue_set_buffer_size(ctx.custom_queue, ctx.buffer_size);
-  run_benchmark(&ctx, "Custom Queue (Pool Allocator)");
-  queue_destroy(ctx.custom_queue);
-  queue_destroy_pool_allocator(&pool_allocator);
-
-  // Item pool convenience function benchmark
-  ctx.type = QUEUE_TYPE_CUSTOM;
-  queue_allocator_t item_pool = queue_create_item_pool(ctx.num_items * 2);  // Estimate based on message count
-  ctx.custom_queue = queue_create(0, &item_pool);
-  queue_set_buffer_size(ctx.custom_queue, ctx.buffer_size);
-  run_benchmark(&ctx, "Custom Queue (Item Pool)");
-  queue_destroy(ctx.custom_queue);
-  queue_destroy_pool_allocator(&item_pool);
-
-  // Thread-local allocator benchmark
-  ctx.type = QUEUE_TYPE_CUSTOM;
-  queue_allocator_t tls_allocator = queue_create_tls_allocator(
-    sizeof(queue_item_t),      // Item size
-    ctx.buffer_size,           // Batch size
-    NULL                       // Use default allocator as base
-  );
-  ctx.custom_queue = queue_create(0, &tls_allocator);
-  queue_set_buffer_size(ctx.custom_queue, ctx.buffer_size);
-  run_benchmark(&ctx, "Custom Queue (Thread-Local Allocator)");
-  queue_destroy(ctx.custom_queue);
-  queue_destroy_tls_allocator(&tls_allocator);
-
-  // Thread-local allocator with pool base benchmark
-  ctx.type = QUEUE_TYPE_CUSTOM;
-  queue_allocator_t base_pool = queue_create_item_pool(ctx.num_items * 2);
-  queue_allocator_t tls_pool_allocator = queue_create_tls_allocator(
-    sizeof(queue_item_t),
-    ctx.buffer_size,
-    &base_pool
-  );
-  ctx.custom_queue = queue_create(0, &tls_pool_allocator);
-  queue_set_buffer_size(ctx.custom_queue, ctx.buffer_size);
-  run_benchmark(&ctx, "Custom Queue (TLS + Pool Allocator)");
-  queue_destroy(ctx.custom_queue);
-  queue_destroy_tls_allocator(&tls_pool_allocator);
-  queue_destroy_pool_allocator(&base_pool);
-
-  // Aligned allocator benchmark (16-byte alignment)
-  ctx.type = QUEUE_TYPE_CUSTOM;
-  queue_allocator_t aligned_allocator = queue_create_aligned_allocator(16, NULL);
-  ctx.custom_queue = queue_create(0, &aligned_allocator);
-  queue_set_buffer_size(ctx.custom_queue, ctx.buffer_size);
-  run_benchmark(&ctx, "Custom Queue (16-byte Aligned Allocator)");
-  queue_destroy(ctx.custom_queue);
-  queue_destroy_aligned_allocator(&aligned_allocator);
-
-  // Aligned allocator with pool base benchmark
-  ctx.type = QUEUE_TYPE_CUSTOM;
-  queue_allocator_t aligned_pool_base = queue_create_item_pool(ctx.num_items * 2);
-  queue_allocator_t aligned_pool = queue_create_aligned_allocator(64, &aligned_pool_base);  // 64-byte alignment (cache line)
-  ctx.custom_queue = queue_create(0, &aligned_pool);
-  queue_set_buffer_size(ctx.custom_queue, ctx.buffer_size);
-  run_benchmark(&ctx, "Custom Queue (Aligned + Pool Allocator)");
-  queue_destroy(ctx.custom_queue);
-  queue_destroy_aligned_allocator(&aligned_pool);
-  queue_destroy_pool_allocator(&aligned_pool_base);
-*/
   
   printf("All benchmarks completed.\n");
   
