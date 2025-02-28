@@ -23,36 +23,31 @@ queue_lib = static_library('queue',
 )
 
 # Create benchmark executable
-benchmark_exe = executable('queue_benchmark',
-  sources: ['benchmark.cpp'],
+bench_mpmc_queue = executable('queue_benchmark',
+  sources: ['unittests/bench_mpmcqueue.cpp'],
   include_directories: include_dirs,
   link_with: [queue_lib],
   dependencies: [thread_dep],
   cpp_args: ['-fpermissive']  # Some C++ comparison libraries might need this
 )
 
-# Define a benchmark target
-benchmark = run_target('run-benchmark',
-  command: [benchmark_exe]
-)
-
-# Add some tests
-test('small_benchmark', benchmark_exe,
+# mpmc queue benchmarks as tests
+test('small_benchmark', bench_mpmc_queue,
   args: ['--producers', '2', '--consumers', '2', '--items', '100000', '--duration', '1'],
   timeout: 60
 )
 
-test('balanced_benchmark', benchmark_exe,
+test('balanced_benchmark', bench_mpmc_queue,
   args: ['--producers', '4', '--consumers', '4', '--items', '1000000', '--duration', '3'],
   timeout: 120
 )
 
-test('producer_heavy', benchmark_exe,
+test('producer_heavy', bench_mpmc_queue,
   args: ['--producers', '8', '--consumers', '2', '--items', '1000000', '--duration', '3'],
   timeout: 120
 )
 
-test('consumer_heavy', benchmark_exe,
+test('consumer_heavy', bench_mpmc_queue,
   args: ['--producers', '2', '--consumers', '8', '--items', '1000000', '--duration', '3'],
   timeout: 120
 )
