@@ -1,4 +1,4 @@
-project('mpmc_queue', 'c', 'cpp',
+project('ContainC', 'c', 'cpp',
   version : '0.1.0',
   default_options : [
     'c_std=c11',
@@ -19,8 +19,15 @@ thread_dep = dependency('threads')
 queue_lib = static_library('queue',
   sources: ['src/queue.c'],
   include_directories: include_dirs,
-  dependencies: [thread_dep]
+  dependencies: [thread_dep],
+  install: true
 )
+
+# Installation directories
+install_dir_include = include_directories('include/')
+install_dir_lib = get_option('prefix') + '/lib'
+
+install_headers('include/ContainC/queue.h', subdir : 'ContainC')
 
 # Create queue mpmc comparative benchmarks
 bench_our_mpmc_queue = executable('bench_our_mpmc_queue',
